@@ -1,12 +1,18 @@
+//import { execFile } from 'child_process';
+//import { promisify } from 'util';
+//import path from 'path';
 import {
   ChatCompletionRequestMessage,
   Configuration,
-  CreateChatCompletionResponse, CreateCompletionResponse,
+  CreateChatCompletionResponse,
+  CreateCompletionResponse,
   CreateImageRequestSizeEnum,
   OpenAIApi
 } from "openai";
-import "@logseq/libs";
-import { backOff } from "exponential-backoff";
+import { backOff } from 'exponential-backoff';
+import fetch from 'cross-fetch';
+
+//const execFilePromise = promisify(execFile);
 
 export type DalleImageSize = 256 | 512 | 1024;
 export interface OpenAIOptions {
@@ -17,6 +23,117 @@ export interface OpenAIOptions {
   dalleImageSize?: DalleImageSize;
   chatPrompt?: string;
   completionEndpoint?: string;
+}
+
+
+export async function fetchRecipe(input: string, openAiOptions: OpenAIOptions): Promise<any> {
+  const options = { ...OpenAIDefaults(openAiOptions.apiKey), ...openAiOptions };
+  const configuration = new Configuration({
+    apiKey: options.apiKey,
+  });
+  const openai = new OpenAIApi(configuration);
+
+  let content = input;
+  if (input.startsWith("http")) {
+    try {
+      content = await fetchHtmlContent(input);
+      console.log("Fetched HTML Content:", content); // Debug output
+      content = extractMainText(content);
+      const maxLength = 5000; 
+      if (content.length > maxLength) {
+        console.warn(`Truncating extracted HTML content to ${maxLength} characters`);
+        content = content.substring(0, maxLength);
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error(`Error fetching HTML content: ${error.message}`);
+      } else {
+        console.error(`Unexpected error: ${error}`);
+      }
+      throw new Error("Failed to fetch HTML content.");
+    }
+  }
+
+  const messages: ChatCompletionRequestMessage[] = [
+    {
+      role: "system",
+      content: `You are a helpful assistant. Extract the recipe from the content provided. If nutrition information is not provided, calculate based on ingredients. Use metric units. If the content is in English, translate to German. Return the extracted recipe as a JSON object with the following fields: title, description, list of ingredients (combine quantity, unit and ingredient as one list item), individual ingredients (only list ingredients without quantity and unit), instructions (one list item per step), prep_time, cook_time, total_time, servings, nutrition_information, cuisine, category, tags. Here is the recipe:`
+    },
+    { role: "user", content: content }
+  ];
+
+  try {
+    const response = await backOff(() =>
+      openai.createChatCompletion({
+        model: "gpt-3.5-turbo",
+        messages,
+        max_tokens: 3000,
+        temperature: 0.5,
+      }),
+      {
+        numOfAttempts: 7,
+        retry: (error: any) => {
+          if (error.response && error.response.status === 429) {
+            console.warn("Rate limit exceeded. Retrying...");
+            return true;
+          }
+          return false;
+        },
+      }
+    );
+
+    const responseText = response.data.choices[0]?.message?.content || "{}";
+    try {
+      return JSON.parse(responseText);
+    } catch (error) {
+      if (error instanceof Error) {
+        console.error("Failed to decode JSON:", responseText, error);
+      } else {
+        console.error("Unexpected error while decoding JSON:", responseText, error);
+      }
+      throw new Error("Failed to decode JSON");
+    }
+  } catch (error) {
+    if (error instanceof Error) {
+      console.error("OpenAI API call error:", error.message);
+    } else {
+      console.error("Unexpected error during OpenAI API call:", error);
+    }
+    throw new Error("Failed to fetch recipe from OpenAI API.");
+  }
+}
+
+async function fetchHtmlContent(url: string): Promise<string> {
+  const response = await fetch(url);
+  const html = await response.text();
+  return html;
+}
+
+function extractMainText(html: string): string {
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(html, 'text/html');
+
+  function getTextContent(element: Element): string {
+    const children = Array.from(element.childNodes);
+    return children.map(child => {
+      if (child.nodeType === Node.TEXT_NODE) {
+        return (child.textContent || '').trim();
+      } else if (child.nodeType === Node.ELEMENT_NODE) {
+        return getTextContent(child as Element);
+      } else {
+        return '';
+      }
+    }).join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  const body = doc.body;
+  if (!body) {
+    return '';
+  }
+
+  const text = getTextContent(body);
+  console.log("Extracted Text:", text); // Debug output
+  return text.substring(0, 2000); // Update to match maxLength
 }
 
 const OpenAIDefaults = (apiKey: string): OpenAIOptions => ({

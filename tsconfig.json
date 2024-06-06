@@ -15,7 +15,9 @@
     "noUnusedParameters": true,
     "noImplicitReturns": true,
     "skipLibCheck": true,
-    "jsx": "react-jsx"
+    "jsx": "react-jsx"//,
+   // "typeRoots": ["./node_modules/@types", "./"]
   },
   "include": ["./src"]
 }
+
